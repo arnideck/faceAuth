@@ -8,7 +8,7 @@
 </template>
 
 <script>
-import { analyzeFace, uploadImage, saveToDynamo } from "../api";
+import { analyzeFace, uploadImage, saveToDynamo } from "../services/api";
 
 export default {
   data() {
