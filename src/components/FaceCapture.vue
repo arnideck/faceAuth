@@ -1,72 +1,113 @@
 <template>
   <div class="camera-container">
-    <div class="video-wrapper">
-      <video ref="video" autoplay></video>
-      <canvas ref="canvas" style="display: none"></canvas>
-      <!-- Agora o Guidelines.vue estará sobre o vídeo corretamente -->
-      <Guidelines :status="faceStatus" :message="guidanceMessage" />
-    </div>
-    <button @click="captureImage">Capturar</button>
+    <video ref="video" autoplay muted playsinline></video>
+    <canvas ref="overlayCanvas"></canvas>
+    <button v-if="faceDetected" @click="confirmCapture">Confirmar Captura</button>
+    <p>{{ message }}</p>
   </div>
 </template>
 
 <script>
-import { analyzeFace, uploadImage, saveToDynamo } from "../services/api";
-import Guidelines from "./Guidelines.vue";
+import { analyzeFace, uploadImage, saveToDynamo } from "../api";
 
 export default {
-  components: { Guidelines },
   data() {
     return {
-      faceStatus: '', // "correct" ou "incorrect"
-      guidanceMessage: 'Posicione seu rosto corretamente.',
+      message: "Posicione seu rosto corretamente.",
+      autoCapture: true,
+      captureInterval: null,
+      currentBase64Image: null,
+      faceDetected: false,
     };
   },
   mounted() {
     this.startCamera();
   },
+  beforeUnmount() {
+    clearInterval(this.captureInterval);
+  },
   methods: {
     async startCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
-        this.$refs.video.srcObject = stream;
-      } catch (error) {
-        console.error("Erro ao acessar a câmera:", error.message);
+      const video = this.$refs.video;
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+
+      if (this.autoCapture) {
+        this.captureInterval = setInterval(this.autoCaptureFrame, 2000);
       }
     },
-    captureImage() {
+
+    async autoCaptureFrame() {
       const video = this.$refs.video;
-      const canvas = this.$refs.canvas;
-      const context = canvas.getContext("2d");
+      const canvas = document.createElement("canvas");
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0);
 
-      canvas.toBlob(async (blob) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(blob);
-        reader.onloadend = async () => {
-          const base64data = reader.result.split(",")[1];
-          await this.processImage(base64data);
-        };
-      }, "image/jpeg");
+      const base64data = canvas.toDataURL("image/jpeg").split(",")[1];
+      const result = await analyzeFace(base64data);
+
+      if (result.boundingBox) {
+        this.message = "Rosto detectado! Clique para confirmar.";
+        this.drawFaceRectangle(result.boundingBox);
+        this.currentBase64Image = base64data;
+        this.faceDetected = true;
+      } else {
+        this.message = "Nenhum rosto detectado. Ajuste sua posição.";
+        this.clearCanvas();
+        this.faceDetected = false;
+      }
     },
-    async processImage(base64data) {
-      try {
-        const faceResponse = await analyzeFace(base64data);
 
-        if (faceResponse.message === "Face válida") {
-          this.faceStatus = "correct";
-          this.guidanceMessage = "Posição correta!";
-          const uploadResponse = await uploadImage(base64data);
-          await saveToDynamo(uploadResponse.fileName, uploadResponse.bucket);
-          alert("Imagem salva com sucesso!");
+    drawFaceRectangle(box) {
+      const video = this.$refs.video;
+      const canvas = this.$refs.overlayCanvas;
+
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.strokeStyle = "lime";
+      ctx.lineWidth = 3;
+
+      ctx.strokeRect(
+          box.Left * canvas.width,
+          box.Top * canvas.height,
+          box.Width * canvas.width,
+          box.Height * canvas.height
+      );
+    },
+
+    clearCanvas() {
+      const canvas = this.$refs.overlayCanvas;
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    },
+
+    async confirmCapture() {
+      if (!this.currentBase64Image) return;
+
+      this.message = "Enviando imagem para S3...";
+      const uploadResponse = await uploadImage(this.currentBase64Image);
+
+      if (uploadResponse.fileName && uploadResponse.bucket) {
+        this.message = "Salvando registro no DynamoDB...";
+        const dynamoResponse = await saveToDynamo(
+            uploadResponse.fileName,
+            uploadResponse.bucket
+        );
+
+        if (dynamoResponse.message) {
+          this.message = dynamoResponse.message;
+          clearInterval(this.captureInterval);
         } else {
-          this.faceStatus = "incorrect";
-          this.guidanceMessage = faceResponse.message;
+          this.message = "Erro ao registrar acesso no DynamoDB.";
         }
-      } catch (error) {
-        console.error("Erro ao processar a imagem:", error);
+      } else {
+        this.message = "Erro ao fazer upload da imagem.";
       }
     },
   },
@@ -75,25 +116,37 @@ export default {
 
 <style scoped>
 .camera-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.video-wrapper {
   position: relative;
   width: 100%;
-  max-width: 400px;
+  height: 100vh;
+  background: black;
+  overflow: hidden;
 }
 
-video {
+video,
+canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
-  display: block;
-  border-radius: 8px;
+  height: 100%;
 }
 
 button {
-  margin-top: 10px;
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+}
+
+p {
+  position: absolute;
+  bottom: 50px;
+  width: 100%;
+  text-align: center;
+  color: #fff;
+  font-size: 18px;
+  z-index: 10;
 }
 </style>
-
